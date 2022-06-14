@@ -1,3 +1,10 @@
+## 3.1.0 (unreleased)
+
+ENHANCEMENTS:
+
+* data-source/http: Allow optionally specifying HTTP request method and body ([#21](https://github.com/hashicorp/terraform-provider-http/issues/21)).
+
+
 ## 3.0.0 (unreleased)
 
 NOTES:
