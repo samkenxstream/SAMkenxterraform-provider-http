@@ -2,16 +2,21 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"mime"
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
 var _ tfsdk.DataSourceType = (*httpDataSourceType)(nil)
@@ -46,6 +51,30 @@ your control should be treated as untrustworthy.`,
 				Type: types.MapType{
 					ElemType: types.StringType,
 				},
+				Optional: true,
+			},
+
+			"request_timeout": {
+				Description: "The request timeout in milliseconds.",
+				Type:        types.Int64Type,
+				Optional:    true,
+				Validators: []tfsdk.AttributeValidator{
+					int64validator.AtLeast(1),
+				},
+			},
+
+			"retry": {
+				Description: "Retry request configuration.",
+				Attributes: tfsdk.SingleNestedAttributes(map[string]tfsdk.Attribute{
+					"attempts": {
+						Description: "The number of retry attempts.",
+						Type:        types.Int64Type,
+						Optional:    true,
+						Validators: []tfsdk.AttributeValidator{
+							int64validator.AtLeast(0),
+						},
+					},
+				}),
 				Optional: true,
 			},
 
@@ -95,12 +124,39 @@ func (d *httpDataSource) Read(ctx context.Context, req tfsdk.ReadDataSourceReque
 		return
 	}
 
+	var retry retryModel
+
+	if !model.Retry.Null && !model.Retry.Unknown {
+		diags = model.Retry.As(ctx, &retry, types.ObjectAsOptions{})
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+
 	url := model.URL.Value
 	headers := model.RequestHeaders
+	timeout := model.RequestTimeout
 
-	client := &http.Client{}
+	var cancel context.CancelFunc
 
-	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if !timeout.IsNull() {
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout.Value)*time.Millisecond)
+		defer cancel()
+	}
+
+	retryClient := retryablehttp.NewClient()
+	retryClient.Logger = levelledLogger{ctx}
+	retryClient.RetryMax = int(retry.Attempts.Value)
+	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if err == nil {
+			return false, nil
+		}
+
+		return true, fmt.Errorf("retrying as request generated error: %w", err)
+	}
+
+	request, err := retryablehttp.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating request",
@@ -120,8 +176,16 @@ func (d *httpDataSource) Read(ctx context.Context, req tfsdk.ReadDataSourceReque
 		request.Header.Set(name, header)
 	}
 
-	response, err := client.Do(request)
+	response, err := retryClient.Do(request)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			resp.Diagnostics.AddError(
+				"Error making request",
+				fmt.Sprintf("The request exceeded the specified timeout: %d ms", timeout.Value),
+			)
+			return
+		}
+
 		resp.Diagnostics.AddError(
 			"Error making request",
 			fmt.Sprintf("Error making request: %s", err),
@@ -152,8 +216,7 @@ func (d *httpDataSource) Read(ctx context.Context, req tfsdk.ReadDataSourceReque
 
 	responseHeaders := make(map[string]string)
 	for k, v := range response.Header {
-		// Concatenate according to RFC2616
-		// cf. https://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html#sec4.2
+		// Concatenate according to RFC9110 https://www.rfc-editor.org/rfc/rfc9110.html#section-5.2
 		responseHeaders[k] = strings.Join(v, ", ")
 	}
 
@@ -204,7 +267,46 @@ type modelV0 struct {
 	ID              types.String `tfsdk:"id"`
 	URL             types.String `tfsdk:"url"`
 	RequestHeaders  types.Map    `tfsdk:"request_headers"`
+	RequestTimeout  types.Int64  `tfsdk:"request_timeout"`
+	Retry           types.Object `tfsdk:"retry"`
 	ResponseHeaders types.Map    `tfsdk:"response_headers"`
 	ResponseBody    types.String `tfsdk:"response_body"`
 	StatusCode      types.Int64  `tfsdk:"status_code"`
+}
+
+type retryModel struct {
+	Attempts types.Int64 `tfsdk:"attempts"`
+}
+
+var _ retryablehttp.LeveledLogger = levelledLogger{}
+
+// levelledLogger is used to log messages from retryablehttp.Client to tflog.
+type levelledLogger struct {
+	ctx context.Context
+}
+
+func (l levelledLogger) Error(msg string, keysAndValues ...interface{}) {
+	tflog.Error(l.ctx, msg, l.additionalFields(keysAndValues))
+}
+
+func (l levelledLogger) Info(msg string, keysAndValues ...interface{}) {
+	tflog.Info(l.ctx, msg, l.additionalFields(keysAndValues))
+}
+
+func (l levelledLogger) Debug(msg string, keysAndValues ...interface{}) {
+	tflog.Debug(l.ctx, msg, l.additionalFields(keysAndValues))
+}
+
+func (l levelledLogger) Warn(msg string, keysAndValues ...interface{}) {
+	tflog.Warn(l.ctx, msg, l.additionalFields(keysAndValues))
+}
+
+func (l levelledLogger) additionalFields(keysAndValues []interface{}) map[string]interface{} {
+	additionalFields := make(map[string]interface{}, len(keysAndValues))
+
+	for i := 0; i+1 < len(keysAndValues); i += 2 {
+		additionalFields[fmt.Sprint(keysAndValues[i])] = keysAndValues[i+1]
+	}
+
+	return additionalFields
 }

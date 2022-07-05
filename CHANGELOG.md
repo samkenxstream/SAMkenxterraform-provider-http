@@ -1,3 +1,10 @@
+## 3.1.0 (unreleased)
+
+ENHANCEMENTS:
+
+* data-source/http: `retry` with nested `attempts` has been added ([#151](https://github.com/hashicorp/terraform-provider-http/pull/151).
+* data-source/http: `request_timeout` has been added ([#151](https://github.com/hashicorp/terraform-provider-http/pull/151).
+
 ## 3.0.0 (unreleased)
 
 NOTES:

@@ -102,6 +102,8 @@ resource "random_uuid" "example" {
 ### Optional
 
 - `request_headers` (Map of String) A map of request header field names and values.
+- `request_timeout` (Number) The request timeout in milliseconds.
+- `retry` (Attributes) Retry request configuration. (see [below for nested schema](#nestedatt--retry))
 
 ### Read-Only
 
@@ -109,3 +111,10 @@ resource "random_uuid" "example" {
 - `response_body` (String) The response body returned as a string.
 - `response_headers` (Map of String) A map of response header field names and values. Duplicate headers are concatenated according to [RFC2616](https://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html#sec4.2).
 - `status_code` (Number) The HTTP response status code.
+
+<a id="nestedatt--retry"></a>
+### Nested Schema for `retry`
+
+Optional:
+
+- `attempts` (Number) The number of retry attempts.

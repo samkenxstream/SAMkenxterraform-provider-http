@@ -4,14 +4,26 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
 func TestDataSource_200(t *testing.T) {
-	testHttpMock := setUpMockHttpServer()
-	defer testHttpMock.server.Close()
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Add("X-Single", "foobar")
+		w.Header().Add("X-Double", "1")
+		w.Header().Add("X-Double", "2")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("1.0.0"))
+	}))
+	defer svr.Close()
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories(),
@@ -19,8 +31,8 @@ func TestDataSource_200(t *testing.T) {
 			{
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-								url = "%s/200"
-							}`, testHttpMock.server.URL),
+								url = "%s"
+							}`, svr.URL),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "1.0.0"),
 					resource.TestCheckResourceAttr("data.http.http_test", "response_headers.Content-Type", "text/plain"),
@@ -34,8 +46,12 @@ func TestDataSource_200(t *testing.T) {
 }
 
 func TestDataSource_404(t *testing.T) {
-	testHttpMock := setUpMockHttpServer()
-	defer testHttpMock.server.Close()
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer svr.Close()
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories(),
@@ -43,8 +59,8 @@ func TestDataSource_404(t *testing.T) {
 			{
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-								url = "%s/404"
-							}`, testHttpMock.server.URL),
+								url = "%s"
+							}`, svr.URL),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("data.http.http_test", "response_body", ""),
 					resource.TestCheckResourceAttr("data.http.http_test", "status_code", "404"),
@@ -54,9 +70,16 @@ func TestDataSource_404(t *testing.T) {
 	})
 }
 
-func TestDataSource_withAuthorizationRequestHeader_200(t *testing.T) {
-	testHttpMock := setUpMockHttpServer()
-	defer testHttpMock.server.Close()
+func TestDataSource_AuthorizationOK(t *testing.T) {
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Zm9vOmJhcg==" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("authorized"))
+		}
+	}))
+	defer svr.Close()
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories(),
@@ -64,14 +87,14 @@ func TestDataSource_withAuthorizationRequestHeader_200(t *testing.T) {
 			{
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-								url = "%s/restricted"
+								url = "%s"
 
 								request_headers = {
 									"Authorization" = "Zm9vOmJhcg=="
 								}
-							}`, testHttpMock.server.URL),
+							}`, svr.URL),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "1.0.0"),
+					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "authorized"),
 					resource.TestCheckResourceAttr("data.http.http_test", "status_code", "200"),
 				),
 			},
@@ -79,9 +102,15 @@ func TestDataSource_withAuthorizationRequestHeader_200(t *testing.T) {
 	})
 }
 
-func TestDataSource_withAuthorizationRequestHeader_403(t *testing.T) {
-	testHttpMock := setUpMockHttpServer()
-	defer testHttpMock.server.Close()
+func TestDataSource_AuthorizationFailed(t *testing.T) {
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Zm9vOmJhcg==" {
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer svr.Close()
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories(),
@@ -89,12 +118,12 @@ func TestDataSource_withAuthorizationRequestHeader_403(t *testing.T) {
 			{
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-  								url = "%s/restricted"
+  								url = "%s"
 
   								request_headers = {
     								"Authorization" = "unauthorized"
   								}
-							}`, testHttpMock.server.URL),
+							}`, svr.URL),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("data.http.http_test", "response_body", ""),
 					resource.TestCheckResourceAttr("data.http.http_test", "status_code", "403"),
@@ -104,9 +133,15 @@ func TestDataSource_withAuthorizationRequestHeader_403(t *testing.T) {
 	})
 }
 
-func TestDataSource_utf8_200(t *testing.T) {
-	testHttpMock := setUpMockHttpServer()
-	defer testHttpMock.server.Close()
+func TestDataSource_ContentTypeOK(t *testing.T) {
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("text"))
+	}))
+	defer svr.Close()
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories(),
@@ -114,10 +149,10 @@ func TestDataSource_utf8_200(t *testing.T) {
 			{
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-  								url = "%s/utf-8/200"
-							}`, testHttpMock.server.URL),
+  								url = "%s"
+							}`, svr.URL),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "1.0.0"),
+					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "text"),
 					resource.TestCheckResourceAttr("data.http.http_test", "response_headers.Content-Type", "text/plain; charset=UTF-8"),
 					resource.TestCheckResourceAttr("data.http.http_test", "status_code", "200"),
 				),
@@ -126,9 +161,15 @@ func TestDataSource_utf8_200(t *testing.T) {
 	})
 }
 
-func TestDataSource_utf16_200(t *testing.T) {
-	testHttpMock := setUpMockHttpServer()
-	defer testHttpMock.server.Close()
+func TestDataSource_ContentTypeOKCharsetNotOK(t *testing.T) {
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=UTF-16")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("content type ok, charset not ok"))
+	}))
+	defer svr.Close()
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories(),
@@ -136,18 +177,28 @@ func TestDataSource_utf16_200(t *testing.T) {
 			{
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-  								url = "%s/utf-16/200"
-							}`, testHttpMock.server.URL),
+  								url = "%s"
+							}`, svr.URL),
 				// This should now be a warning, but unsure how to test for it...
 				// ExpectWarning: regexp.MustCompile("Content-Type is not a text type. Got: application/json; charset=UTF-16"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "content type ok, charset not ok"),
+					resource.TestCheckResourceAttr("data.http.http_test", "status_code", "200"),
+				),
 			},
 		},
 	})
 }
 
-func TestDataSource_x509cert(t *testing.T) {
-	testHttpMock := setUpMockHttpServer()
-	defer testHttpMock.server.Close()
+func TestDataSource_ContentTypeNotOk(t *testing.T) {
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("content type not ok"))
+	}))
+	defer svr.Close()
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories(),
@@ -155,10 +206,10 @@ func TestDataSource_x509cert(t *testing.T) {
 			{
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-  								url = "%s/x509-ca-cert/200"
-							}`, testHttpMock.server.URL),
+  								url = "%s"
+							}`, svr.URL),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "pem"),
+					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "content type not ok"),
 					resource.TestCheckResourceAttr("data.http.http_test", "status_code", "200"),
 				),
 			},
@@ -167,8 +218,17 @@ func TestDataSource_x509cert(t *testing.T) {
 }
 
 func TestDataSource_UpgradeFromVersion2_2_0(t *testing.T) {
-	testHttpMock := setUpMockHttpServer()
-	defer testHttpMock.server.Close()
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Add("X-Single", "foobar")
+		w.Header().Add("X-Double", "1")
+		w.Header().Add("X-Double", "2")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("upgrade"))
+	}))
+	defer svr.Close()
 
 	resource.Test(t, resource.TestCase{
 		Steps: []resource.TestStep{
@@ -181,10 +241,10 @@ func TestDataSource_UpgradeFromVersion2_2_0(t *testing.T) {
 				},
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-								url = "%s/200"
-							}`, testHttpMock.server.URL),
+								url = "%s"
+							}`, svr.URL),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "1.0.0"),
+					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "upgrade"),
 					resource.TestCheckResourceAttr("data.http.http_test", "response_headers.Content-Type", "text/plain"),
 					resource.TestCheckResourceAttr("data.http.http_test", "response_headers.X-Single", "foobar"),
 					resource.TestCheckResourceAttr("data.http.http_test", "response_headers.X-Double", "1, 2"),
@@ -194,18 +254,18 @@ func TestDataSource_UpgradeFromVersion2_2_0(t *testing.T) {
 				ProtoV6ProviderFactories: protoV6ProviderFactories(),
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-								url = "%s/200"
-							}`, testHttpMock.server.URL),
+								url = "%s"
+							}`, svr.URL),
 				PlanOnly: true,
 			},
 			{
 				ProtoV6ProviderFactories: protoV6ProviderFactories(),
 				Config: fmt.Sprintf(`
 							data "http" "http_test" {
-								url = "%s/200"
-							}`, testHttpMock.server.URL),
+								url = "%s"
+							}`, svr.URL),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "1.0.0"),
+					resource.TestCheckResourceAttr("data.http.http_test", "response_body", "upgrade"),
 					resource.TestCheckResourceAttr("data.http.http_test", "response_headers.Content-Type", "text/plain"),
 					resource.TestCheckResourceAttr("data.http.http_test", "response_headers.X-Single", "foobar"),
 					resource.TestCheckResourceAttr("data.http.http_test", "response_headers.X-Double", "1, 2"),
@@ -216,48 +276,54 @@ func TestDataSource_UpgradeFromVersion2_2_0(t *testing.T) {
 	})
 }
 
-type TestHttpMock struct {
-	server *httptest.Server
+func TestDataSource_Timeout(t *testing.T) {
+	t.Parallel()
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(time.Duration(10) * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer svr.Close()
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+							data "http" "http_test" {
+  								url = "%s"
+								request_timeout = 5
+							}`, svr.URL),
+				ExpectError: regexp.MustCompile(`The request exceeded the specified timeout: 5 ms`),
+			},
+		},
+	})
 }
 
-func setUpMockHttpServer() *TestHttpMock {
-	Server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/plain")
-			w.Header().Add("X-Single", "foobar")
-			w.Header().Add("X-Double", "1")
-			w.Header().Add("X-Double", "2")
+func TestDataSource_Retry(t *testing.T) {
+	uid := uuid.New()
 
-			switch r.URL.Path {
-			case "/200":
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("1.0.0"))
-			case "/restricted":
-				if r.Header.Get("Authorization") == "Zm9vOmJhcg==" {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte("1.0.0"))
-				} else {
-					w.WriteHeader(http.StatusForbidden)
-				}
-			case "/utf-8/200":
-				w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("1.0.0"))
-			case "/utf-16/200":
-				w.Header().Set("Content-Type", "application/json; charset=UTF-16")
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("1.0.0"))
-			case "/x509-ca-cert/200":
-				w.Header().Set("Content-Type", "application/x-x509-ca-cert")
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("pem"))
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-		}),
-	)
-
-	return &TestHttpMock{
-		server: Server,
-	}
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+							data "http" "http_test" {
+  								url = "https://%s.com"
+								retry = {
+									attempts = 1
+								}
+							}`, uid.String()),
+				ExpectError: regexp.MustCompile(
+					fmt.Sprintf(
+						"Error making request: GET https://%s.com\n"+
+							"giving up after 2 attempt\\(s\\): retrying as request generated error: Get\n"+
+							"\"https://%s.com\": dial tcp: lookup\n"+
+							"%s.com: no such host",
+						uid.String(), uid.String(), uid.String(),
+					),
+				),
+			},
+		},
+	})
 }

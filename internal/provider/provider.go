@@ -11,9 +11,10 @@ func New() tfsdk.Provider {
 	return &provider{}
 }
 
-var _ tfsdk.Provider = (*provider)(nil)
+type provider struct {
+}
 
-type provider struct{}
+var _ tfsdk.Provider = (*provider)(nil)
 
 func (p *provider) GetSchema(context.Context) (tfsdk.Schema, diag.Diagnostics) {
 	return tfsdk.Schema{}, nil
