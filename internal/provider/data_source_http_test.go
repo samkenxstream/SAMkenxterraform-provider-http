@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
@@ -251,7 +250,7 @@ func TestDataSource_ResponseBodyBinary(t *testing.T) {
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/gif")
-		_, _ = fmt.Fprintf(w, transPixel)
+		_, _ = w.Write([]byte(transPixel))
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer svr.Close()
@@ -272,8 +271,6 @@ func TestDataSource_ResponseBodyBinary(t *testing.T) {
 			},
 		},
 	})
-
-	fmt.Println(utf8.Valid([]byte(`你好世界`)))
 }
 
 type TestHttpMock struct {
